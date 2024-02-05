@@ -1,8 +1,0 @@
-discussed during meeting with Paul on 11/9/2023
-
-1. Iowa state university "Soybean Planting Decision tool"
-https://crops.extension.iastate.edu/facts/soybean-planting-decision-tool
-
-2. Tools by Armen R. Kemanian, Ph.D., Professor of Production Systems and Modeling
-crop growth model
-https://plantscience.psu.edu/research/labs/kemanian/models-and-tools/cycles
