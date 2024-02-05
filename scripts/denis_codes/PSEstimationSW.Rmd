@@ -1,0 +1,809 @@
+---
+title: "Estimation of STABILIZED weights for covariate balance"
+author: "Denis Shah"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    fig_caption: yes
+    highlight: tango
+    number_sections: true
+    theme: cerulean
+    toc: yes
+    toc_depth: 4
+    toc_float: true
+    editor_options: 
+      chunk_output_type: console
+---
+
+```{r knitr-setup, include=FALSE, eval=TRUE}
+options(digits = 3)
+require(knitr)
+## options
+knitr::opts_chunk$set(eval = TRUE, echo = FALSE, cache = FALSE)
+```
+
+
+```{r Libaries, message=FALSE}
+library(tidyverse)
+library(tictoc)
+library(WeightIt)
+library(cobalt)
+library(gbm)
+library(CBPS)
+library(optweight)
+library(SuperLearner)
+library(dbarts)
+
+library(kableExtra)
+```
+
+
+```{r helper-functions}
+make_kable <- function(...) {
+  # kable and kableExtra styling to avoid repetitively calling the styling over and over again
+  # See: https://stackoverflow.com/questions/73718600/option-to-specify-default-kableextra-styling-in-rmarkdown
+  # knitr::kable(...) %>%
+  kable(..., format = "html", row.names = TRUE) %>%
+    kable_styling(bootstrap_options = c("striped"), position = "left", font_size = 11, full_width = FALSE) 
+}
+```
+
+
+
+```{r load-data}
+load("~/Esker/SoybeanFSTCausal/Data/stf.RData")
+
+# a formula of the trt as a function of the other variables (note we have to remove yield from the names):
+fmla <- reformulate(setdiff(names(stf), c("yield", "ST_Fungicide")), "ST_Fungicide")
+```
+
+
+<!-- Propensity score models -->
+<!-- ## logistic regression ("glm") -->
+```{r glm, eval=FALSE}
+tic()
+W.glm <- weightit(fmla, data = stf, estimand = "ATE", method = "glm", stabilize = T)
+toc() # 0.2 sec
+```
+
+
+<!-- ## bias-reduced logistic regression ("brglm") -->
+```{r brglm, eval=FALSE}
+library(brglm2)
+# See the example code on https://ngreifer.github.io/cobalt/articles/optimizing-balance.html#bal-compute-and-bal-init
+tic()
+W.brglm <- weightit(fmla, data = stf, estimand = "ATE", method = "glm", link = "br.logit", stabilize = T)
+toc() # 0.41 sec
+```
+
+
+<!-- ## Generalized boosted modeling PS ("gbm") -->
+```{r gbm, eval=FALSE}
+tic()
+W.gbm <- weightit(fmla, data = stf, estimand = "ATE", method = "gbm", criterion = "smd.mean", stabilize = T)
+toc() # 107 sec
+```
+
+
+<!-- ## Generalized boosted modeling PS tuned ("gbm") -->
+```{r gbm-tuned, eval=FALSE}
+# See as a starter:
+# https://ngreifer.github.io/cobalt/articles/optimizing-balance.html#tuning-gbm-for-balance  
+
+# For further details on each method consult https://ngreifer.github.io/WeightIt/reference/index.html, under Specific estimation methods
+
+tic()
+W.gbm.tuned <- weightit(fmla, data = stf, estimand = "ATE", method = "gbm", 
+                        criterion = "energy.dist", n.trees = 4000,
+                        stabilize = T)
+toc() # 36.21 sec
+
+# Display the best tree:
+W.gbm.tuned$info$best.tree  # 1744
+```
+
+
+<!-- ## Covariate Balancing PS ("cbps") -->
+```{r cbps, eval=FALSE}
+# When the estimand is the ATE, the return propensity score is the probability of being in the "second" treatment group, i.e., levels(factor(treat))[2]; 
+# Check:
+# levels(stf$ST_Fungicide) 
+# we are good
+
+tic()
+W.cbps <- weightit(fmla, data = stf, estimand = "ATE", method = "cbps", stabilize = T)
+toc() # 16.98 sec
+```
+
+
+<!-- ## Non-Parametric Covariate Balancing PS ("npcbps") -->
+```{r npcbps, eval=FALSE}
+# This was taking too long, not worth it...
+tic()
+W.npcbps <- weightit(fmla, data = stf, estimand = "ATE", method = "npcbps")
+toc()
+```
+
+<!-- ## Entropy Balancing ("ebal") -->
+```{r ebal, eval=FALSE}
+# no additional packages need to be installed to use entropy balancing.
+tic()
+W.ebal <- weightit(fmla, data = stf, estimand = "ATE", method = "ebal", stabilize = T)
+toc() # 0.28 sec
+```
+
+<!-- ## Optimization-Based Weights ("optweight") -->
+```{r optweight, eval=FALSE}
+tic()
+W.optweight <- weightit(fmla, data = stf, estimand = "ATE", method = "optweight", stabilize = T)
+toc() # 0.72 sec
+```
+
+
+<!-- ## SuperLearner PS ("super") -->
+```{r super, eval=FALSE}
+listWrappers()
+
+# NOTE: this can be computationally expensive, so be careful how many algorithms are included.
+tic()
+W.super <- weightit(fmla, data = stf, estimand = "ATE", method = "super", stabilize = T,
+                    SL.library = c("SL.mean", "SL.earth", "SL.glm", "SL.gam", "SL.bayesglm"))
+toc()  # 23.17 sec
+
+summary(W.super$weights)
+```
+
+<!-- ## Super Learner (not exactly tuning here, but making adjustments for covariate balance) -->
+```{r super-method-balance, eval=FALSE}
+tic()
+W.super.MB <- weightit(fmla, data = stf, estimand = "ATE", method = "super", stabilize = T,
+                    SL.library = c("SL.mean", "SL.earth", "SL.glm", "SL.gam", "SL.bayesglm"),
+                    SL.method = "method.balance",
+                    criterion = "smd.mean")
+toc()  # 38.8 sec
+```
+
+
+<!-- ## Bayesian Additive Regression Trees PS ("bart") -->
+```{r bart, eval=FALSE}
+tic()
+W.bart <- weightit(fmla, data = stf, estimand = "ATE", method = "bart", stabilize = T)
+toc()  # 3.38 sec
+```
+
+<!-- ## Energy Balancing ("energy") -->
+```{r energy, eval=FALSE}
+# This method may be slow or memory-intensive for large datasets.
+# NOTE: Energy balancing is a method of estimating weights using optimization without a propensity score. So, the fit object will NOT have a field for ps.
+# Energy balancing can sometimes yield weights with high variability; the lambda argument can be supplied to penalize highly variable weights to increase the effective sample size at the expense of balance.
+
+tic()
+W.energy <- weightit(fmla, data = stf, estimand = "ATE", method = "energy", stabilize = T)
+toc()  # 39.41 sec
+
+# the default distance matrix (used above) is "scaled_euclidean". Now try "mahalanobis":
+tic()
+W.energy.mnbs <- weightit(fmla, data = stf, estimand = "ATE", method = "energy", dist.mat = "mahalanobis", stabilize = T)
+toc() # 27.84 sec
+```
+
+
+```{r save-the-results, eval=FALSE}
+# A list of the files we need:
+grep("^W.", names(.GlobalEnv), value = TRUE)
+
+# Save the results, so that you don't need to rerun (some algorithms take a while):
+save(W.energy.mnbs, W.super.MB, W.gbm, W.super, W.ebal, W.cbps, W.gbm.tuned, W.bart, W.brglm, W.glm, W.optweight, W.energy, file = "PScoresSW.RData")
+```
+
+
+-------------------
+
+
+<!-- Load the objects -->
+```{r load-objects}
+# the data:
+load("~/Esker/SoybeanFSTCausal/Data/stf.RData")
+# the propensity scores:
+load("~/Esker/SoybeanFSTCausal/Analysis/PropensityScoreEstimation/PScoresSW.RData")
+```
+
+
+# Scalar sample balance statistics
+```{r scalar-balance-stats-info, eval=FALSE}
+# Balance statistics. Which ones are available for a binary treatment?
+cobalt::available.stats(treat.type = "binary")  
+# Dang, 16 of them! But some are for continuous outcomes only.
+
+# For their descriptions, see:
+# https://ngreifer.github.io/cobalt/reference/bal.compute.html
+
+# Among these, may want to look at:
+# smd.mean
+# ovl.mean
+# mahalanobis (covariates are standardized to remove correlations between them and de-emphasize redundant covariates)
+# energy.dist
+# kernel.dist
+
+# The actual performance of each depends on the unique features of the data and system under study.
+# For example, in the unlikely case that the true outcome model is linear in the covariates, using the "smd" or "mahalanobis" statistics will work well for binary treatments. 
+# In more realistic cases, though, every measure has its advantages and disadvantages.
+# For binary treatments, only "energy.dist", "kernel.dist", and "L1.med" reflect balance on all features of the joint covariate distribution, whereas the others summarize across balance statistics computed for each covariate ignoring the others. 
+# Noah Greifer's personal preference: "energy.dist"
+```
+
+
+```{r balance-statistic-init}
+# Initialize the object with the balance statistic, treatment, and covariates:
+# smd.mean
+smd.init <- bal.init(x = stf %>% dplyr::select(-yield, -ST_Fungicide), 
+                     treat = stf$ST_Fungicide,
+                     stat = "smd.mean")
+
+# ovl.mean
+ovl.init <- bal.init(x = stf %>% dplyr::select(-yield, -ST_Fungicide), 
+                     treat = stf$ST_Fungicide,
+                     stat = "ovl.mean")
+
+# mahalanobis
+mahalanobis.init <- bal.init(x = stf %>% dplyr::select(-yield, -ST_Fungicide), 
+                     treat = stf$ST_Fungicide,
+                     stat = "mahalanobis")
+
+# kernel.dist
+kernel.init <- bal.init(x = stf %>% dplyr::select(-yield, -ST_Fungicide), 
+                     treat = stf$ST_Fungicide,
+                     stat = "kernel.dist")
+
+# energy.dist
+energy.init <- bal.init(x = stf %>% dplyr::select(-yield, -ST_Fungicide), 
+                     treat = stf$ST_Fungicide,
+                     stat = "energy.dist")
+
+
+# Compute balance with no weights:
+unwght <- c(bal.compute(smd.init), bal.compute(ovl.init), bal.compute(mahalanobis.init), bal.compute(kernel.init), bal.compute(energy.init))
+
+
+# Compute the balance statistic on the estimated weights:
+# Define a function so that you avoid repeating same lines of code:
+
+bal.stats <- function(x) {
+  # Compute scalar balance statistics
+  # Args:
+  #  x = a weightit object
+  # Returns:
+  #  a vector of the balance statistics
+  #
+  c(bal.compute(smd.init, get.w(x)), 
+    bal.compute(ovl.init, get.w(x)), 
+    bal.compute(mahalanobis.init, get.w(x)), 
+    bal.compute(kernel.init, get.w(x)), 
+    bal.compute(energy.init, get.w(x)))
+}
+
+# GLM
+glm.stats <- bal.stats(x = W.glm)
+
+# Bias-reduced glm
+brglm.stats <- bal.stats(x = W.brglm)
+
+# GBM
+gbm.stats <- bal.stats(x = W.gbm)
+
+# GBM tuned
+gbmtuned.stats <- bal.stats(x = W.gbm.tuned)
+
+# CBPS
+cbps.stats <- bal.stats(x = W.cbps)
+
+# Entropy balancing
+ebal.stats <- bal.stats(x = W.ebal)
+
+# Optimization-based weights
+optweight.stats <- bal.stats(x = W.optweight)
+
+# Super Learner
+super.stats <- bal.stats(x = W.super)
+
+# Super Learner adjusted for covariate balance
+super.MB.stats <- bal.stats(x = W.super.MB)
+
+# BART
+bart.stats <- bal.stats(x = W.bart)
+
+# Energy (default distance matrix)
+energy.stats <- bal.stats(x = W.energy)
+
+# Energy (Mahalanobis distance matrix)
+energy.mnbs.stats <- bal.stats(x = W.energy.mnbs)
+
+
+# Now place everything into one tibble:
+tibble(statistic = c("smd", "ovl", "mahalanobis", "kernel", "energy"),
+       unweighted = unwght,
+       GLM = glm.stats,
+       BRGLM = brglm.stats,
+       GBM = gbm.stats,
+       GBMT = gbmtuned.stats,
+       CBPS = cbps.stats,
+       EBAL = ebal.stats,
+       OPTWT = optweight.stats,
+       SL = super.stats,
+       SLMB = super.MB.stats,
+       BART = bart.stats,
+       Energy = energy.stats,
+       EnergyMNBS = energy.mnbs.stats) %>%
+  # Table is too wide. Use the two following pivoting functions to get a more appealing structure
+  tidyr::pivot_longer(cols = unweighted:EnergyMNBS, names_to = "Method") %>% 
+  tidyr::pivot_wider(names_from = "statistic", values_from = "value") %>% 
+  make_kable()
+```
+
+
+# Balance assessments
+[Notes from the WeightIt Get Started page](https://ngreifer.github.io/WeightIt/articles/WeightIt.html) 
+
+Weights with low variability are desirable because they improve the precision of the estimator. 
+This variability is presented in several ways: 
+
+- by the ratio of the largest weight to the smallest in each group,   
+- the coefficient of variation (standard deviation divided by the mean) of the weights in each group,
+
+- and the effective sample size computed from the weights.  
+- That is, we want a small ratio, a smaller coefficient of variation, and a large effective sample size (ESS).
+
+From the cobalt bal.tab documentation:  
+
+- Variance ratios are another important tool for assessing balance beyond mean differences because they pertain to the shape of the covariate distributions beyond their centers. Variance ratios close to 1 (i.e., equal variances in both groups) are indicative of group balance
+- The overlapping coefficient measures the amount of overlap in the covariate distributions between two groups. The complement is used so that 0 indicates perfectly overlapping distributions and 1 indicates perfectly non-overlapping distributions. Avoids some of the weaknesses of the KS statistic.
+
+
+```{r testing-the-functions, eval=FALSE, echo=FALSE}
+# The bal.tab function:
+# stats requested are standardized mean difference [raw differences in proportion for binary variables] (m), variance ratio [not meaningful for binary variables] (v), the complement of the (weighted) overlapping coefficient (o)
+cobalt::bal.tab(W.glm, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2))
+cobalt::bal.tab(W.glm, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+
+
+# The bal.plot function:
+# The gold standard for covariate balance is multidimensional independence between treatment and covariates. Because this is hard to visualize and assess with the large numbers of covariates typical of causal effect analysis, univariate balance is typically assessed as a proxy.
+
+# Examining distributional balance is a more thorough method to assess balance between groups. Complimenting statistics with a visual examination of the distributional densities can be an effective way of assessing distributional similarity between the groups
+
+bal.plot(W.glm, var.name = "mean.rh.R3toR7", which = "both", type = "ecdf")  # a continuous variable
+bal.plot(W.glm, var.name = "MG", which = "both")  # a categorical variable
+
+
+# Distributional balance can also be assessed on the distance measure (e.g. propensity score). Mirroring only works with binary treatments (which we do have with the ST data).
+# NOTE: It is generally not a useful assessment of balance to examine the overlap of the distance measure distributions after adjustment, as most conditioning methods will yield good distributional overlap on the distance measure whether or not balance is achieved on the covariates. However, it may be useful to see the new range of the distance measure if calipers or common support pruning are used.
+
+bal.plot(W.glm, var.name = "prop.score",
+         which = "both",
+         type = "histogram",
+         mirror = TRUE)
+
+
+# The love.plot function:
+love.plot(W.glm, binary = "std", thresholds = c(m = .1))
+# For variance ratios, accounting for the fact that there is no variance ratio for binary vars:
+love.plot(W.glm, stats = "variance.ratios", thresholds = c(v = 1.2), drop.missing = FALSE)
+# Absolute mean differences:
+love.plot(W.glm, stats = c("mean.diffs"), abs = TRUE, binary = "std", thresholds = c(m = .1),
+          drop.distance = TRUE,
+          var.order = "unadjusted",
+          themes = theme(axis.text.y = element_text(size = 5, colour = "grey30")))
+
+
+# Comparing balancing methods:
+bal.plot(ST_Fungicide ~ MG, data = stf, 
+         weights = list(GLM = W.glm,
+                        BART = W.bart,
+                        Energy = W.energy),
+         var.name = "MG", which = "both")
+
+love.plot(fmla,
+          data = stf, 
+          weights = list(GLM = W.glm,
+                        BART = W.bart,
+                        Energy = W.energy),
+          var.order = "unadjusted", 
+          stats = c("mean.diffs"), 
+          s.d.denom = "pooled",
+          thresholds = c(m = .1),
+          drop.distance = TRUE,
+          binary = "std",
+          abs = TRUE, 
+          colors = c("#d53e4f", "#fdae61", "#fee08b", "#abdda4"),
+          alpha = 1.0)
+```
+
+
+## Balance tables {.tabset .tabset-fade .tabset-pills}
+### GLM
+```{r Balance-tables-GLM}
+bal.tab(W.glm, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### BRGLM
+```{r Balance-tables-BRGLM}
+bal.tab(W.brglm, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### GBM
+```{r Balance-tables-GBM}
+bal.tab(W.gbm, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### GBM -tuned
+```{r Balance-tables-GBM-tuned}
+bal.tab(W.gbm.tuned, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### CBPS
+```{r Balance-tables-CBPS}
+bal.tab(W.cbps, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### EBAL
+```{r Balance-tables-EBAL}
+bal.tab(W.ebal, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### OPTWT
+```{r Balance-tables-OPTWT}
+bal.tab(W.optweight, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### SL
+```{r Balance-tables-SL}
+bal.tab(W.super, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### SLMB
+```{r Balance-tables-SLMB}
+bal.tab(W.super.MB, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### BART
+```{r Balance-tables-BART}
+bal.tab(W.bart, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### Energy
+```{r Balance-tables-Energy}
+bal.tab(W.energy, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### EnergyMNBS
+```{r Balance-tables-EnergyMNBS}
+bal.tab(W.energy.mnbs, stats = c("m", "v", "o"), thresholds = c(m = .05, v = 2), imbalanced.only = T)
+```
+
+### Summary
+Based on the above output, GLM looks good, as well as BRGLM. Also OPTWT and Energy. We focus on these four in the next sections.
+
+Notice that weighting via ML algorithms was poorer (gbm, BART, SL)
+
+
+## Balance plots {.tabset .tabset-fade .tabset-pills}
+```{r balance-plot-functions}
+# For continuous variables:
+bal.plot.cont <- function(x) {
+  # Visualize Distributional Balance for continuous variables
+  # Args: 
+  #  x = character string of the variable
+  # Returns:
+  #  a balance plot
+  bal.plot(f.build(y = "ST_Fungicide", rhs = x), 
+           data = stf, 
+           weights = list(GLM = W.glm,
+                          BRGLM = W.brglm,
+                          OPTWT = W.optweight,
+                          Energy = W.energy),
+           var.name = x, 
+           which = "both",
+           type = "histogram",
+           mirror = TRUE)
+  }
+
+
+# For categorical variables:
+bal.plot.cg <- function(x) {
+  # Visualize Distributional Balance for categorical variables
+  # Args: 
+  #  x = character string of the variable
+  # Returns:
+  #  a balance plot
+  bal.plot(f.build(y = "ST_Fungicide", rhs = x),
+           data = stf, 
+           weights = list(GLM = W.glm,
+                          BRGLM = W.brglm,
+                          OPTWT = W.optweight,
+                          Energy = W.energy),
+           var.name = x, 
+           which = "both")
+  }
+```
+
+### Continuous variables {.tabset .tabset-fade .tabset-pills}
+#### `doy`
+```{r balance-plot-doy}
+bal.plot.cont("doy")
+```
+
+#### `row.space` 
+```{r balance-plot-row-space}
+bal.plot.cont("row.space")
+```
+
+#### `seed.rate`
+```{r balance-plot-seed-rate}
+bal.plot.cont("seed.rate")
+```
+
+#### `OM.0.30.cm`
+```{r balance-plot-OM-0-30-cm}
+bal.plot.cont("OM.0.30.cm")
+```
+
+#### `pH.0.30.cm`
+```{r balance-plot-pH-0-30-cm}
+bal.plot.cont("pH.0.30.cm")
+```
+
+#### `TWI`
+```{r balance-plot-TWI}
+bal.plot.cont("TWI")
+```
+
+#### `lr.sand`
+```{r balance-plot-lr-sand}
+bal.plot.cont("lr.sand")
+```
+
+#### `lr.clay`
+```{r balance-plot-lr-clay}
+bal.plot.cont("lr.clay")
+```
+
+#### `PDtoEmerg` 
+```{r balance-plot-PDtoEmerg}
+bal.plot.cont("PDtoEmerg")
+```
+
+#### `sum.swe.boytopd`
+```{r balance-plot-sum-swe-boytopd}
+bal.plot.cont("sum.swe.boytopd")
+```
+
+#### `sum.prcp.pdtoemg`
+```{r balance-plot-sum-prcp-pdtoemg}
+bal.plot.cont("sum.prcp.pdtoemg")
+```
+
+#### `sum.prcp.emgtoR3`
+```{r balance-plot-sum-prcp-emgtoR3}
+bal.plot.cont("sum.prcp.emgtoR3")
+```
+
+#### `sum.prcp.R3toR7`   
+```{r balance-plot-sum-prcp-R3toR7}
+bal.plot.cont("sum.prcp.R3toR7")
+```
+
+#### `sum.srad.emgtoR3`
+```{r balance-plot-sum-srad-emgtoR3}
+bal.plot.cont("sum.srad.emgtoR3")
+```
+
+#### `sum.srad.R3toR7`
+```{r balance-plot-sum-srad-R3toR7}
+bal.plot.cont("sum.srad.R3toR7")
+```
+
+#### `mean.tave.pdtoemg`
+```{r balance-plot-mean-tave-pdtoemg}
+bal.plot.cont("mean.tave.pdtoemg")
+```
+
+#### `mean.tave.emgtoR3`  
+```{r balance-plot-mean-tave-emgtoR3}
+bal.plot.cont("mean.tave.emgtoR3")
+```
+
+#### `mean.tave.R3toR7`
+```{r balance-plot-mean-tave-R3toR7}
+bal.plot.cont("mean.tave.R3toR7")
+```
+
+#### `mean.rh.emgtoR3`
+```{r balance-plot-mean-rh-emgtoR3}
+bal.plot.cont("mean.rh.emgtoR3")
+```
+
+#### `mean.rh.R3toR7`
+```{r balance-plot-mean-rh-R3toR7}
+bal.plot.cont("mean.rh.R3toR7")
+```
+
+
+### Categorical variables {.tabset .tabset-fade .tabset-pills}
+#### `artificial.drainage`
+```{r balance-plot-artificial-drainage}
+bal.plot.cg("artificial.drainage")
+```
+
+#### `till.type`
+```{r balance-plot-till-type}
+bal.plot.cg("till.type")
+```
+
+#### `nonstarter.fert`
+```{r balance-plot-nonstarter-fert}
+bal.plot.cg("nonstarter.fert")
+```
+
+#### `lime`
+```{r balance-plot-lime}
+bal.plot.cg("lime")
+```
+
+#### `manure`
+```{r balance-plot-manure}
+bal.plot.cg("manure")
+```
+
+#### `MG`
+```{r balance-plot-MG}
+bal.plot.cg("MG")
+```
+
+#### `starter.fert`
+```{r balance-plot-starter-fert}
+bal.plot.cg("starter.fert")
+```
+
+#### `foliar.fungicide`   
+```{r balance-plot-foliar-fungicide}
+bal.plot.cg("foliar.fungicide")
+```
+
+#### `foliar.insecticide`
+```{r balance-plot-foliar-insecticide}
+bal.plot.cg("foliar.insecticide")
+```
+
+#### `herbicide`
+```{r balance-plot-herbicide}
+bal.plot.cg("herbicide")
+```
+
+#### `nematodes`
+```{r balance-plot-nematodes}
+bal.plot.cg("nematodes")
+```
+
+#### `iron.def`           
+```{r balance-plot-iron-def}
+bal.plot.cg("iron.def")
+```
+
+#### `PAWR`
+```{r balance-plot-PAWR}
+bal.plot.cg("PAWR")
+```
+
+#### `GDD`   
+```{r balance-plot-GDD}
+bal.plot.cg("GDD")
+```
+
+#### `AI`
+```{r balance-plot-AI}
+bal.plot.cg("AI")
+```
+
+#### `P205`
+```{r balance-plot-P205}
+bal.plot.cg("P205")
+```
+
+#### `K20`
+```{r balance-plot-K20}
+bal.plot.cg("K20")
+```
+
+#### `root.depth`
+```{r balance-plot-root-depth}
+bal.plot.cg("root.depth")
+```
+
+
+## Love plot {.tabset .tabset-fade .tabset-pills}
+### Standardized mean differences
+
+```{r love-plot-mean-diffs}
+love.plot(fmla,
+          data = stf, 
+          weights = list(GLM = W.glm,
+                         BRGLM = W.brglm,
+                         OPTWT = W.optweight,
+                         Energy = W.energy),
+          var.order = "unadjusted", 
+          stats = c("mean.diffs"), 
+          s.d.denom = "pooled",
+          thresholds = c(m = .1),
+          drop.distance = TRUE,
+          binary = "std",
+          abs = TRUE, 
+          colors = c("#d53e4f", "#fdae61", "#fee08b", "#abdda4", "cornflowerblue"),
+          alpha = 0.8,
+          size = 3,
+          position = "bottom",
+          themes = theme(axis.text.y = element_text(size = 5, colour = "grey30"))
+          )
+```
+
+
+### Variance ratios {.tabset .tabset-fade .tabset-pills}
+#### All four methods
+```{r love-plot-variance-ratios}
+love.plot(fmla,
+          data = stf, 
+          weights = list(GLM = W.glm,
+                         BRGLM = W.brglm,
+                         OPTWT = W.optweight,
+                         Energy = W.energy),
+          var.order = "unadjusted", 
+          stats = c("variance.ratios"), 
+          s.d.denom = "pooled",
+          thresholds = c(v = 1.2),
+          drop.distance = TRUE,
+          binary = "std",
+          abs = TRUE, 
+          colors = c("#d53e4f", "#fdae61", "#fee08b", "#abdda4", "cornflowerblue"),
+          alpha = 0.8,
+          position = "bottom")
+```
+
+
+#### GLM and OPTWT
+```{r love-plot-variance-ratios-II}
+love.plot(fmla,
+          data = stf, 
+          weights = list(GLM = W.glm,
+                         OPTWT = W.optweight),
+          var.order = "unadjusted", 
+          stats = c("variance.ratios"), 
+          s.d.denom = "pooled",
+          thresholds = c(v = 1.2),
+          drop.distance = TRUE,
+          binary = "std",
+          abs = TRUE, 
+          colors = c("#d53e4f", "#fdae61", "#abdda4"),
+          alpha = 0.8,
+          position = "bottom")
+```
+
+# Summary
+So, OPTWT looking good, but alas! There are some VERY SMALL weights with OPTWT which will cause problems when using the inverse!
+
+```{r summary, echo=TRUE}
+summary(W.glm$weights)
+
+summary(W.optweight$weights)
+
+tibble(optwt = W.optweight$weights) %>% 
+  dplyr::filter(optwt <= 0.0001)
+```
+
+<!-- The same problem with Energy weights -->
+```{r summary-energy, eval=FALSE}
+summary(W.energy$weights)
+
+tibble(optwt = W.energy$weights) %>% 
+  dplyr::filter(optwt <= 0.0001)
+```
+
+

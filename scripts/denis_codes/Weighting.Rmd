@@ -1,0 +1,208 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(tidyverse)
+library(WeightIt)
+library(marginaleffects)
+
+
+library(tictoc)
+
+
+library(parallel)
+library(boot)
+```
+
+The code in this script is based on the vignettes for the `WeightIt` package.
+
+https://ngreifer.github.io/WeightIt/articles/estimating-effects.html#estimating-treatment-effects-and-standard-errors-after-weighting -->
+Robust SEs treat the estimated weights as if they were fixed and known, ignoring uncertainty in their estimation. Although they are quick and simple to estimate using functionality in the sandwich and survey packages, they should be used with caution, and the bootstrap (described below) should be preferred in most cases.
+
+# Roadmap
+We have estimated the propensity score and assessed balance. Decided upon scores estimated with a glm with stabilization (i.e., stabilized weights).
+
+When doing g-computation after weighting, the outcome model should be fit incorporating the estimated weights.
+
+Basically, what we are doing is weighted g-computation, with a linear (glm) model specified for Y = f(A, W).
+
+There are analytic and bootstrap approximations to the SEs of the g-computation estimate. 
+
+
+```{r load-the-data}
+# The data (Y, X, W) have been prepared earlier and saved.
+load("~/Esker/SoybeanFSTCausal/Data/stf.RData")
+# Make a copy:
+x <- stf
+
+rm(stf)
+
+# The weights object:
+load("~/Esker/SoybeanFSTCausal/Analysis/4_Weighting/PropensityScoreEstimation/PScoresSW.RData")
+# Remove the other W. objects EXCEPT W.glm:
+rm(list = setdiff(ls(pattern = "^W."), "W.glm") )
+```
+
+
+```{r model-formulas}
+# trt as a function of the covariates (note we have to remove yield from the names):
+fmla0 <- reformulate(setdiff(names(x), c("yield", "ST_Fungicide")), "ST_Fungicide")
+
+# yield as a linear function of trt and the covariates (NO treatment-covariate interactions):
+fmla1 <- reformulate(setdiff(names(x), c("yield")), "yield")
+
+# the covariates
+covars <- setdiff(names(x), c("yield", "ST_Fungicide"))
+# yield as a function of trt and covariates, AND with treatment-covariate interactions:
+fmla2 <- as.formula(paste0("yield", "~ ", "ST_Fungicide*(", paste(covars, collapse =" + "), ")"))
+```
+
+
+```{r add-weights-to-dataframe}
+# Bring weights into the dataset:
+x$weights <- W.glm$weights
+```
+
+
+```{r fit-linear-models-for-yield}
+# Linear model for yield with trt and covariates (but no treatment-covariate interactions)
+fit1 <- lm(fmla1, data = x, weights = weights)
+
+# Linear model for yield with trt and covariates (AND treatment-covariate interactions)
+fit2 <- lm(fmla2, data = x, weights = weights)
+```
+
+
+```{r ATE-with-robust-standard-errors}
+# rse = robust standard error
+
+# Linear model with no treatment-covariate interactions:
+fit1.avg <-
+  avg_comparisons(fit1,
+                  variables = "ST_Fungicide",
+                  vcov = "HC3")
+
+fit1.rse <-
+  tibble(method = "Weighting - linear model (no inter) - robust SE",
+         tau = fit1.avg$estimate,
+         lci = fit1.avg$conf.low,
+         uci = fit1.avg$conf.high)
+
+
+# Linear model with treatment-covariate interactions:
+fit2.avg <-
+  avg_comparisons(fit2,
+                  variables = "ST_Fungicide",
+                  vcov = "HC3")
+
+fit2.rse <-
+  tibble(method = "Weighting - linear model (with inter) - robust SE",
+         tau = fit2.avg$estimate,
+         lci = fit2.avg$conf.low,
+         uci = fit2.avg$conf.high)
+```
+
+
+```{r setup-boot-function}
+boot_fun <- function(data, i, my.fmla) {
+  
+  boot_data <- data[i, ]
+  
+  # PS weighting for the ATE:
+  W <- WeightIt::weightit(fmla0, data = boot_data, estimand = "ATE", method = "glm", stabilize = T)
+  
+  # Bring weights into the dataset:
+  boot_data$weights <- W$weights
+  
+  # Fit outcome model:
+  fit <- lm(my.fmla, data = boot_data, weights = weights)
+  
+  # G-computation:
+  comp <- marginaleffects::avg_comparisons(fit,
+                                           variables = "ST_Fungicide",
+                                           vcov = FALSE)
+  
+  comp$estimate
+}
+
+# A little test that you are recovering the point estimate (looks good):
+boot_fun(x, i = 1:nrow(x), my.fmla = fmla1)
+boot_fun(x, i = 1:nrow(x), my.fmla = fmla2)
+```
+
+
+```{r bootstrap-estimates-no-treatment-covariate-interactions}
+## linear model, no treatment-covariate interactions
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop, 16 on the 2023 HP desktop
+clusterExport(cl, c('x', 'fmla0', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt"); library("marginaleffects")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+boot_out <- boot(x, boot_fun, my.fmla = fmla1, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 331.77 sec ~ 5.5 min on the 2018 desktop
+
+stopCluster(cl)
+
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(boot_out, type = "bca")  # 16.96, 116.23 (95% CI)
+toc()  # 74.16 sec on 2018 desktop
+
+# b = bootstrap
+fit1.b <-
+  tibble(method = "Weighting - linear model (no inter) - bootstrap SE",
+         tau = fit1.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+```{r bootstrap-estimates-with-treatment-covariate-interactions}
+## linear model, with treatment-covariate interactions
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop, 16 on the 2023 HP desktop
+clusterExport(cl, c('x', 'fmla0', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt"); library("marginaleffects")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+boot_out <- boot(x, boot_fun, my.fmla = fmla2, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 401.39 sec ~ 6.7 min on the 2018 desktop
+
+stopCluster(cl)
+
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(boot_out, type = "bca")  # 20.57, 119.92 (95% CI)
+toc()  # 76.88 sec on 2018 desktop
+
+# b = standard bootstrap
+fit2.b <-
+  tibble(method = "Weighting - linear model (with inter) - bootstrap SE",
+         tau = fit2.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+```{r collate-the estimates}
+# Put together the estimates into one tibble:
+ate.weighting <- bind_rows(fit1.rse, fit1.b, fit2.rse, fit2.b)
+```
+
+
+```{r save-the-estimates}
+save(ate.weighting, file = "weighting.RData")
+```
+

@@ -1,0 +1,369 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries}
+library(tidyverse)
+library(MatchIt)
+library(cobalt)
+library(tictoc)
+library(marginaleffects)
+
+library(parallel)
+library(boot)
+```
+
+The code in this script is based on the vignettes for the MatchIt package.
+
+```{r load-the-data}
+# The data (Y, X, W) have been prepared earlier and saved.
+load("~/Esker/SoybeanFSTCausal/Data/stf.RData")
+# Make a copy:
+x <- stf
+
+rm(stf)
+```
+
+
+```{r model-formulas}
+# trt as a function of the covariates (note we have to remove yield from the names):
+fmla0 <- reformulate(setdiff(names(x), c("yield", "ST_Fungicide")), "ST_Fungicide")
+
+# yield as a linear function of trt and the covariates (NO treatment-covariate interactions):
+fmla1 <- reformulate(setdiff(names(x), c("yield")), "yield")
+
+# the covariates
+covars <- setdiff(names(x), c("yield", "ST_Fungicide"))
+# yield as a function of trt and covariates, AND with treatment-covariate interactions:
+fmla2 <- as.formula(paste0("yield", "~ ", "ST_Fungicide*(", paste(covars, collapse =" + "), ")"))
+```
+
+
+```{r full-matching}
+# Optimal full matching on the PS for the ATE:
+tic()
+mF <- matchit(fmla0, data = x, method = "full", estimand = "ATE")
+toc()  # 18.36 sec
+
+mF
+```
+
+<!-- Assessing balance after matching: -->
+```{r propensity-score-distribution}
+# Distribution of propensity scores:
+plot(mF, type = "jitter", interactive = FALSE)
+```
+
+<!-- Balance table -->
+```{r balance-table}
+cobalt::bal.tab(mF, un = TRUE, stats = c("m", "v", "ks"))
+```
+
+<!-- Love plots -->
+```{r Love-plots}
+# The love.plot function:
+love.plot(mF, binary = "std", thresholds = c(m = .15),
+          themes = list(theme(axis.text.y = element_text(size = 5),
+                              axis.title.x = element_text(size = 10, face = "bold"))))
+
+# For variance ratios, accounting for the fact that there is no variance ratio for binary vars:
+love.plot(mF, stats = "variance.ratios", thresholds = c(v = 1.2), drop.missing = FALSE,
+          themes = theme(axis.text.y = element_text(size = 5, colour = "grey30")))
+
+# Absolute mean differences:
+love.plot(mF, stats = c("mean.diffs"), abs = TRUE, binary = "std", thresholds = c(m = .1),
+          drop.distance = TRUE,
+          var.order = "unadjusted",
+          themes = theme(axis.text.y = element_text(size = 5, colour = "grey30")))
+
+# Summary:
+# The plots look good. Balance is good overall.
+```
+
+
+```{r extract-the-matched-data}
+# Extract matched data
+md <- match.data(mF)
+
+head(md)
+```
+
+
+```{r fit-linear-models-for-yield}
+# Linear model for yield with trt and covariates (but no treatment-covariate interactions)
+fit1 <- lm(fmla1, data = md, weights = weights)
+
+# Linear model for yield with trt and covariates (AND treatment-covariate interactions)
+fit2 <- lm(fmla2, data = md, weights = weights)
+```
+
+
+```{r Cluster-robust-standard-errors}
+# crse = Cluster-robust standard error
+
+fit1.avg <-
+  avg_comparisons(fit1, variables = "ST_Fungicide",
+                  vcov = ~subclass,
+                  wts = "weights")
+
+fit1.crse <-
+  tibble(method = "Matching - linear model (no inter) - cluster robust SE",
+         tau = fit1.avg$estimate,
+         lci = fit1.avg$conf.low,
+         uci = fit1.avg$conf.high)
+```
+
+
+```{r}
+fit2.avg <-
+  avg_comparisons(fit2, variables = "ST_Fungicide",
+                  vcov = ~subclass,
+                  wts = "weights")
+
+fit2.crse <-
+  tibble(method = "Matching - linear model (with inter) - cluster robust SE",
+         tau = fit2.avg$estimate,
+         lci = fit2.avg$conf.low,
+         uci = fit2.avg$conf.high)
+```
+
+
+```{r propensity-score-polynomial-terms, eval=FALSE}
+# There is another case that is mentioned in the MatchIt vignette https://kosukeimai.github.io/MatchIt/articles/estimating-effects.html
+
+# "You can also include the propensity score (usually labeled distance in the match.data() output), which can add some robustness, especially when modeled flexibly (e.g., with polynomial terms or splines) (Austin 2017)". The Austin (2017) paper is here:
+# https://journals.sagepub.com/doi/10.1177/0962280214543508  
+# The method is illustrated by Noah Griefer here:
+# https://stats.stackexchange.com/questions/580118/adjusting-the-model-by-propensity-scores-after-propensity-score-matching/580174#580174  
+
+m.data <- match.data(mF, distance = "ps")
+
+fit3 <- lm(yield ~ ST_Fungicide * splines::ns(qlogis(ps), 5),
+          data = m.data, weights = weights)
+
+avg_comparisons(fit3,
+                variables = "ST_Fungicide",
+                vcov = ~subclass,
+                wts = "weights")
+
+# Hmmm, slightly positive mean estimate, larger std error (compared to the two other fits above), CI spanning 0. Not sure if I trust this is an appropriate approach here.
+```
+
+
+<!-- The standard bootstrap -->
+```{r standard-bootstrap-function}
+boot_fun <- function(data, i, my.fmla) {
+  boot_data <- data[i, ]
+  
+  # Do 1:1 PS matching with replacement:
+  m <- matchit(fmla0,
+               data = boot_data,
+               replace = TRUE)
+  
+  # Extract matched dataset
+  md <- match.data(m, data = boot_data)
+  
+  # Fit outcome model
+  fit <- lm(my.fmla,
+            data = md, weights = weights)
+  
+  ## G-computation ##
+  # Estimated potential outcomes under treatment
+  p1 <- predict(fit, 
+                newdata = transform(md, ST_Fungicide = "Yes"))
+  Ep1 <- weighted.mean(p1, md$weights)
+  
+  # Estimated potential outcomes under control
+  p0 <- predict(fit, type = "response",
+                newdata = transform(md, ST_Fungicide = "No"))
+  Ep0 <- weighted.mean(p0, md$weights)
+  
+  # Difference
+  return(Ep1 - Ep0)
+}
+```
+
+
+```{r standard-bootstrap-estimates-no-treatment-covariate-interactions}
+## linear model, no treatment-covariate interactions
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop, 16 on the 2023 HP desktop
+clusterExport(cl, c('x', 'fmla0', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+boot_out <- boot(x, boot_fun, my.fmla = fmla1, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 394.07 sec ~ 6.5 min on the 2018 desktop
+
+stopCluster(cl)
+
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(boot_out, type = "bca")  # -22.68, 119.18 (95% CI)
+toc()  # 77.15 sec on 2018 desktop
+
+# sb = standard bootstrap
+fit1.sb <-
+  tibble(method = "Matching - linear model (no inter) - std bootstrap SE",
+         tau = fit1.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+```{r standard-bootstrap-estimates-with-treatment-covariate-interactions}
+## linear model, with treatment-covariate interactions
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop, 16 on the 2023 HP desktop
+clusterExport(cl, c('x', 'fmla0', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+boot_out <- boot(x, boot_fun, my.fmla = fmla2, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 434.82 sec ~ 7.2 min on the 2018 desktop
+
+stopCluster(cl)
+
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(boot_out, type = "bca")  # -9.55, 130.64 (95% CI)
+toc()  # 74.17 sec on 2018 desktop
+
+# sb = standard bootstrap
+fit2.sb <-
+  tibble(method = "Matching - linear model (with inter) - std bootstrap SE",
+         tau = fit2.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+<!-- The cluster bootstrap -->
+```{r cluster-bootstrap-function}
+# The matched data
+# md
+
+# Unique pair IDs
+pair_ids <- levels(md$subclass)
+
+# Unit IDs, split by pair membership
+split_inds <- split(seq_len(nrow(md)), md$subclass)
+
+cluster_boot_fun <- function(pairs, i, my.fmla) {
+  
+  #Extract units corresponding to selected pairs
+  ids <- unlist(split_inds[pairs[i]])
+  
+  # Subset md with block bootstrapped indices
+  boot_md <- md[ids,]
+  
+  # Fit outcome model
+  fit <- lm(my.fmla,
+            data = boot_md, weights = weights)
+  
+  ## G-computation ##
+  
+  # Estimated potential outcomes under treatment
+  p1 <- predict(fit, 
+                newdata = transform(md, ST_Fungicide = "Yes"))
+  Ep1 <- weighted.mean(p1, md$weights)
+  
+  # Estimated potential outcomes under control
+  p0 <- predict(fit, 
+                newdata = transform(md, ST_Fungicide = "No"))
+  Ep0 <- weighted.mean(p0, md$weights)
+  
+  # Difference
+  return(Ep1 - Ep0)
+}
+```
+
+
+```{r cluster-bootstrap-estimates-no-treatment-covariate-interactions}
+## linear model, no treatment-covariate interactions
+
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop
+clusterExport(cl, c('md', 'pair_ids', 'split_inds', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+cluster_boot_out <- boot(pair_ids, cluster_boot_fun, my.fmla = fmla1, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 62.44 sec ~ 1 min on the 2018 desktop
+
+stopCluster(cl)
+
+cluster_boot_out
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(cluster_boot_out, type = "bca")  # 0.69, 114.61 (95% CI)
+toc()  # 5.89 sec
+
+
+# cb = standard bootstrap
+fit1.cb <-
+  tibble(method = "Matching - linear model (no inter) - cluster bootstrap SE",
+         tau = fit1.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+```{r cluster-bootstrap-estimates-with-treatment-covariate-interactions}
+## linear model, with treatment-covariate interactions
+
+
+# Set up for parallel processing:
+cl <- makePSOCKcluster(5)  # 6 cores on the 2018 desktop
+clusterExport(cl, c('md', 'pair_ids', 'split_inds', 'fmla1', 'fmla2'))
+clusterEvalQ(cl, {library("stats"); library("MatchIt")})
+
+tic()
+set.seed(54321)
+# Using more bootstraps allows you to use Bca confidence intervals 
+cluster_boot_out <- boot(pair_ids, cluster_boot_fun, my.fmla = fmla2, R = 4999, parallel = "snow", ncpus = 5, cl = cl)
+toc() # 117.27 sec ~ 2 min on the 2018 desktop
+
+stopCluster(cl)
+
+cluster_boot_out
+
+# bias-corrected accelerated (BCa) bootstrap confidence interval (this takes some time):
+tic()
+bca <- boot.ci(cluster_boot_out, type = "bca")  # 9.47, 120.21 (95% CI)
+toc()  # 5.89 sec
+
+
+# cb = standard bootstrap
+fit2.cb <-
+  tibble(method = "Matching - linear model (with inter) - cluster bootstrap SE",
+         tau = fit2.avg$estimate,
+         lci = bca$bca[4],
+         uci = bca$bca[5])
+```
+
+
+```{r collate-the estimates}
+# Put together the estimates into one tibble:
+ate.matching <- bind_rows(fit1.crse, fit1.sb, fit1.cb, fit2.crse, fit2.sb, fit2.cb)
+```
+
+
+```{r save-the-estimates}
+save(ate.matching, file = "matching.RData")
+```
+

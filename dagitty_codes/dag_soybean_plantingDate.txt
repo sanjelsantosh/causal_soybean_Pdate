@@ -1,0 +1,103 @@
+# 11/9/2023
+# Following DAG was created before meeting with Paul
+# Planting date -> yield
+
+dag {
+"Crop growth" [pos="-0.014,0.241"]
+"Harvest date" [pos="0.601,0.939"]
+"NPK application" [pos="-0.276,-1.374"]
+"Planting Date" [exposure,pos="-1.539,0.201"]
+"Soil T° for x days after sowing" [pos="-0.964,1.301"]
+"T° for x days after sowing" [pos="-0.944,0.884"]
+"crop rotation" [pos="-0.910,-0.874"]
+"disease severity" [pos="0.719,-0.354"]
+"maturity group" [pos="-1.457,-0.644"]
+"planting depth" [pos="0.598,-0.668"]
+"row width" [pos="0.260,-1.009"]
+"seeding rate" [pos="0.525,-0.997"]
+"soil moisture on sowing" [pos="-0.955,0.535"]
+"soil pH" [pos="-0.377,-1.104"]
+"soil properties" [pos="-0.702,-1.311"]
+Variety [pos="-1.993,-0.481"]
+Yield [outcome,pos="1.342,0.301"]
+"Crop growth" -> "Harvest date"
+"Crop growth" -> Yield
+"Harvest date" -> Yield
+"NPK application" -> "Crop growth"
+"Planting Date" -> "Crop growth"
+"Soil T° for x days after sowing" -> "Crop growth"
+"Soil T° for x days after sowing" -> "Planting Date"
+"T° for x days after sowing" -> "Crop growth"
+"T° for x days after sowing" -> "Planting Date"
+"crop rotation" -> "Crop growth"
+"disease severity" -> "Crop growth"
+"disease severity" -> Yield
+"maturity group" -> "Crop growth"
+"maturity group" -> Yield
+"planting depth" -> "Crop growth"
+"row width" -> "Crop growth"
+"seeding rate" -> "Crop growth"
+"soil moisture on sowing" -> "Crop growth"
+"soil moisture on sowing" -> "Planting Date"
+"soil pH" -> "Crop growth"
+"soil properties" -> "Crop growth"
+Variety -> "Crop growth"
+Variety -> "Planting Date"
+Variety -> "maturity group"
+Variety -> Yield
+}
+
+
+# added latitude and longitude
+
+dag {
+"Crop growth" [pos="-0.014,0.241"]
+"Harvest date" [pos="0.601,0.939"]
+"NPK application" [pos="0.189,-1.371"]
+"Planting Date" [exposure,pos="-1.539,0.201"]
+"Soil T° for x days after sowing" [pos="-0.964,1.301"]
+"T° for x days after sowing" [pos="-0.944,0.884"]
+"crop rotation" [pos="-0.341,-1.145"]
+"disease severity" [pos="0.795,-0.391"]
+"maturity group" [pos="-1.457,-0.644"]
+"planting depth" [pos="0.598,-0.668"]
+"row width" [pos="0.314,-1.037"]
+"seeding rate" [pos="0.604,-0.962"]
+"soil moisture on sowing" [pos="-0.955,0.535"]
+"soil pH" [pos="-0.056,-1.162"]
+"soil properties" [pos="-0.245,-1.436"]
+Variety [pos="-1.993,-0.481"]
+Yield [outcome,pos="1.342,0.301"]
+latitude [pos="-0.871,-1.260"]
+longitude [pos="-0.811,-0.800"]
+"Crop growth" -> "Harvest date"
+"Crop growth" -> Yield
+"Harvest date" -> Yield
+"NPK application" -> "Crop growth"
+"Planting Date" -> "Crop growth"
+"Soil T° for x days after sowing" -> "Crop growth"
+"Soil T° for x days after sowing" -> "Planting Date"
+"T° for x days after sowing" -> "Crop growth"
+"T° for x days after sowing" -> "Planting Date"
+"crop rotation" -> "Crop growth"
+"disease severity" -> "Crop growth"
+"disease severity" -> Yield
+"maturity group" -> "Crop growth"
+"maturity group" -> Yield
+"planting depth" -> "Crop growth"
+"row width" -> "Crop growth"
+"seeding rate" -> "Crop growth"
+"soil moisture on sowing" -> "Crop growth"
+"soil moisture on sowing" -> "Planting Date"
+"soil pH" -> "Crop growth"
+"soil properties" -> "Crop growth"
+Variety -> "Crop growth"
+Variety -> "Planting Date"
+Variety -> "maturity group"
+Variety -> Yield
+latitude -> "Crop growth"
+latitude -> "Planting Date"
+longitude -> "Crop growth"
+longitude -> "Planting Date"
+}
+#change this

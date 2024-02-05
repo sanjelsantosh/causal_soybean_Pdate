@@ -1,0 +1,275 @@
+---
+title: 'codes for: Causal models to estimate the effect of planting date recommendation
+  on soybean yield'
+date: "2024-01-22"
+output: html_document
+---
+
+```{r libraries}
+library(tidyverse)
+library(MatchIt)
+library(cobalt)
+library(Publish)
+library(tableone)
+library(marginaleffects)
+
+library(parallel)
+library(boot)
+```
+
+## Causal model framework
+
+Data: Soybean farmer survey data from 11 states in North Central US Planting date recommendation zones map developed by soybean researchers was used to classify if the observed planting date as optimal or non-optimal
+
+```{r, out.width = "100%", fig.align = "center", echo = FALSE}
+# Path to the JPG file
+jpg_path <- "outputs/pDate_ArcGis.jpg"
+
+# Display the JPG file
+knitr::include_graphics(jpg_path)
+```
+
+```{r, out.width = "100%", fig.align = "center", echo = FALSE}
+
+# Path to the DAG file
+dag_path <- "outputs/dag_PD_yield.png"
+
+# Display the png file
+knitr::include_graphics(dag_path)
+```
+
+```{r dag}
+library(dagitty)
+
+dag_PD <- dagitty("dag {
+Crop_growth -> Harvest_date
+Crop_growth -> Yield
+Harvest_date -> Yield
+NPK_application -> Crop_growth
+Planting_Date -> Crop_growth
+Planting_Date -> disease_severity
+Yield_Environment -> Crop_growth
+Yield_Environment -> Yield
+disease_severity -> Crop_growth
+disease_severity -> Yield
+field_condition -> Planting_Date
+fungicide_application -> disease_severity
+maturity_group -> Crop_growth
+maturity_group -> Planting_Date
+maturity_group -> Yield
+planting_depth -> Crop_growth
+row_width -> Crop_growth
+seeding_rate -> Crop_growth
+soil_pH -> Crop_growth
+soil_properties -> Crop_growth
+latitude -> Crop_growth
+latitude -> Planting_Date
+latitude -> maturity_group
+longitude -> Crop_growth
+longitude -> Planting_Date
+longitude -> maturity_group
+previous.crop -> Crop_growth
+previous.crop -> Planting_Date
+}")
+
+
+#minimal adjustment set
+cat("the minimal adjustment set")
+adjustmentSets(dag_PD, "Planting_Date", "Yield")
+```
+
+Intervention: Adhering to recommended planting date, Treatments:- T=1 : optimal planting, T=0 : Non-optimal planting
+
+```{r load-the-data}
+load("data/obsData.RData")
+data <- obsData
+rm(obsData)
+
+#clean data, remove NA
+data_cleaned <- na.omit(data)
+head(data_cleaned)
+```
+
+```{r PS-formula}
+# prepare the baseline vars with all the covariates
+baselinevars <- names(dplyr::select(data_cleaned,
+                                    !c(yield, PD_yday, P_Rdoy, diff_pd_rpd, Y, A)))
+
+# fullmodel formula 
+full.model.formula <- as.formula(paste("Y~ A +", 
+                                paste(baselinevars, 
+                                      collapse = "+")))
+cat('Full model formula: \n')
+print(full.model.formula)
+
+# propensity score formula
+ps.formula <- as.formula(paste("A~", 
+                               paste(baselinevars, collapse = "+")))
+
+cat('PS formula: \n')
+print(ps.formula)
+
+cat('\nA is the treatment variable \n A = 1 is optimal planting \n A = 0 is non-optimal planting')
+
+```
+
+```{r PS-full-matching}
+# full match
+match.obj.full <- matchit(ps.formula, data = data_cleaned,
+                     method = "full", 
+                     estimand = "ATE")
+
+```
+
+```{r balance-of-matching}
+# Plot to show PS score matching 
+plot(match.obj.full, type = "jitter", interactive = FALSE)
+```
+
+```{r balance-plot}
+# balance table
+cobalt::bal.tab(match.obj.full, un = TRUE, 
+        thresholds = c(m = .1))
+# blance plot
+cobalt::bal.plot(match.obj.full,  
+         var.name = "distance", 
+         which = "both", 
+         type = "histogram",  
+         mirror = TRUE)
+
+# PS score distribution seems to be well adjusted 
+
+```
+```{r love-plot}
+# love plot
+cobalt::love.plot(match.obj.full, binary = "std", 
+          thresholds = c(m = .1))
+
+# balance is not good, standardized mean difference of many variable out of range
+
+# need to check for alternate balancing specification
+```
+
+
+```{r alternate-matching}
+
+#Full matching on probit PS, check if the balance will improve
+m.out2 <- matchit(ps.formula, data = data_cleaned,
+                     method = "full", 
+                     distance = "glm",
+                     link = "probit")
+
+m.out2
+
+```
+
+```{r balance check}
+
+#balance summary
+cobalt::bal.tab(m.out2, un = TRUE, 
+        thresholds = c(m = .1))
+
+# balance plot
+cobalt::bal.plot(m.out2,  
+         var.name = "distance", 
+         which = "both", 
+         type = "histogram",  
+         mirror = TRUE)
+
+# love plot
+cobalt::love.plot(m.out2, binary = "std", 
+          thresholds = c(m = .1))
+
+# balance improved with Full-matching on probit PS
+```
+
+``` {r extract the balance data}
+# extract the data 
+m.out2.data <- match.data(m.out2)
+head(m.out2.data)
+```
+
+```{r weight-adjusted-model}
+fit.out.matched <- lm(full.model.formula,
+                     data = m.out2.data,
+                     weights = weights) 
+
+# Effect summary using the outcome model 
+adj.fit2 <- Publish::publish(fit.out.matched, digits=1)$regressionTable[2,]
+print(adj.fit2)
+
+```
+
+```{r cluster-robust-standard-errors}
+# crse = cluster-robust standard error
+# effect estimates
+
+#G-computation and ATE estimation (better method)
+marginaleffects::avg_comparisons(fit.out.matched,
+                variables = "A",
+                vcov = ~subclass,
+                newdata = subset(m.out2.data, A == 1),
+                wts = "weights")
+
+```
+
+
+``````{r standard-bootstrap-function}
+# Bootstrapping following PS matching
+
+boot_fun <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #Do 1:1 PS matching with replacement
+  m <- matchit(A ~ latitude + longitude + MG.f + prev.crop.type,
+               data = boot_data,
+               replace = TRUE)
+  
+  #Extract matched dataset
+  md <- match.data(m, data = boot_data)
+  
+  #Fit outcome model
+  fit <- lm(Y ~ A + latitude + longitude + MG.f + prev.crop.type,
+             data = md, weights = weights)
+  
+  ## G-computation ##
+  
+  #Estimated potential outcomes under treatment
+  p1 <- predict(fit, type = "response",
+                newdata = transform(md, A = 1))
+  Ep1 <- weighted.mean(p1, md$weights)
+  
+  #Estimated potential outcomes under control
+  p0 <- predict(fit, type = "response",
+                newdata = transform(md, A = 0))
+  Ep0 <- weighted.mean(p0, md$weights)
+  
+  # Difference
+  return(Ep1 - Ep0)
+}
+```
+
+```{r standard-bootstrap-estimates-no-treatment-covariate-interactions}
+## linear model, no treatment-covariate interactions
+
+# Using bootstraps for confidence intervals 
+library("boot")
+set.seed(54321)
+boot_out <- boot(data_cleaned, boot_fun, R = 1999)
+
+boot_out
+
+boot.ci(boot_out, type = "perc")
+#ORDINARY NONPARAMETRIC BOOTSTRAP
+boot_out
+
+#problematic bootstrapped CI is 0.
+
+# trying different type of distribution, normal distribution
+CI1 <- boot.ci(boot_out, type = "norm")  
+CI1
+
+# trying percentile
+CI2 <- boot.ci(boot_out, type = "perc")
+CI2
+``` 
